@@ -1,16 +1,21 @@
 """
-StudyBuddy: trợ lý ôn tập AI mã nguồn mở (Gradio + mô hình Llama qua Groq hoặc Ollama)
+StudyBuddy: trợ lý ôn tập AI mã nguồn mở, học mà chơi (Gradio + mô hình Llama qua Groq hoặc Ollama)
 
-Tính năng:
-- Quiz trắc nghiệm tạo từ chủ đề, từ văn bản dán vào hoặc từ file .txt/.md/.pdf.
+Học tập:
+- Quiz trắc nghiệm tạo từ chủ đề, nội dung dán vào hoặc file .txt/.md/.pdf.
   Với tài liệu, mỗi câu kèm trích dẫn nguyên văn và được kiểm tra có thật trong tài liệu hay không.
-- Chấm điểm, giải thích, ôn lại câu sai, tải báo cáo kết quả (.md).
-- Theo dõi tiến độ theo chủ đề nhỏ và chỉ ra chủ đề còn yếu.
-- Lập kế hoạch học tập dựa trên mục tiêu và kết quả quiz.
-- Hỏi đáp với trợ lý.
-- Chạy được cả khi không có AI: bộ câu hỏi mẫu và kế hoạch mẫu vẫn dùng bình thường.
+- Giải thích, ôn lại câu sai, báo cáo kết quả, theo dõi tiến độ theo chủ đề, kế hoạch học tập, hỏi đáp.
+
+Trò chơi:
+- Đấu quái vật: 3 mạng, trả lời đúng để làm quái vật yếu đi, chuỗi đúng gây đòn chí mạng.
+- Điểm kinh nghiệm (XP), cấp độ, linh thú tiến hóa, huy hiệu, gợi ý 50/50.
+- Thẻ ghi nhớ (lật thẻ, tự đánh giá, thẻ chưa nhớ quay lại sau).
+- Nhắc nghỉ ngơi sau vài ván. Không lưu thông tin cá nhân, không bảng xếp hạng công khai.
+
+Chạy được cả khi không có AI: bộ câu hỏi mẫu, thẻ mẫu và kế hoạch mẫu vẫn dùng bình thường.
 """
 import json
+import math
 import os
 import random
 import re
@@ -40,11 +45,62 @@ MAX_PDF_PAGES = 40
 LETTERS = "ABCD"
 WEAK_THRESHOLD = 0.7
 
+# --- Trò chơi
+MODE_BOSS = "⚔️ Đấu quái vật (3 mạng)"
+MODE_PRACTICE = "📖 Luyện tập (không mất mạng)"
+MAX_LIVES = 3
+HINTS_PER_QUIZ = 2
+BOSS_HP_RATIO = 0.7  # cần đúng khoảng 70% để hạ quái vật
+BADGE_BONUS_XP = 10
+REST_EVERY = 3  # nhắc nghỉ sau mỗi 3 ván
+
+BOSSES = [
+    {"name": "Quái vật Quên Bài", "emoji": "👾"},
+    {"name": "Bóng ma Đãng Trí", "emoji": "👻"},
+    {"name": "Robot Nhầm Lẫn", "emoji": "🤖"},
+    {"name": "Slime Lười Học", "emoji": "🟢"},
+]
+
+# (điểm XP tối thiểu, danh hiệu, linh thú, tên linh thú)
+LEVELS = [
+    (0, "Tập sự phòng thí nghiệm", "🥚", "Trứng bí ẩn"),
+    (100, "Nhà thám hiểm nhí", "🐣", "Chim non"),
+    (250, "Nhà khoa học trẻ", "🐱", "Mèo con tò mò"),
+    (450, "Nhà phát minh", "🦉", "Cú thông thái"),
+    (700, "Giáo sư tí hon", "🦊", "Cáo tinh khôn"),
+    (1000, "Bậc thầy khoa học", "🐲", "Rồng trí tuệ"),
+]
+
+BADGES = {
+    "first_quiz": ("🚀", "Khởi đầu", "Hoàn thành quiz đầu tiên"),
+    "streak3": ("🔥", "Chuỗi lửa", "Trả lời đúng 3 câu liên tiếp"),
+    "streak5": ("⚡", "Bão sét", "Trả lời đúng 5 câu liên tiếp"),
+    "perfect": ("💯", "Điểm tuyệt đối", "Đúng hết một quiz (từ 3 câu trở lên)"),
+    "boss_win": ("🏆", "Thợ săn quái vật", "Đánh bại một quái vật"),
+    "comeback": ("🔁", "Sửa sai thành công", "Đúng hết khi ôn lại các câu sai"),
+    "explorer": ("🧭", "Nhà thám hiểm", "Trả lời câu hỏi thuộc 5 chủ đề khác nhau"),
+    "marathon": ("📚", "Chăm chỉ", "Hoàn thành 3 quiz"),
+    "cards": ("🃏", "Nhà ghi nhớ", "Nhớ 10 thẻ ghi nhớ"),
+}
+
+CORRECT_MSGS = ["Chính xác!", "Tuyệt vời!", "Quá đỉnh!", "Làm tốt lắm!", "Đúng rồi!"]
+WRONG_MSGS = [
+    "Chưa đúng, nhưng không sao!",
+    "Gần rồi, xem giải thích nhé!",
+    "Sai cũng là cơ hội để học thêm!",
+    "Không sao, lần sau sẽ nhớ!",
+]
+
 DIFFICULTY_HINTS = {
     "Dễ": "ghi nhớ kiến thức cơ bản, câu hỏi ngắn gọn",
     "Vừa": "hiểu và vận dụng đơn giản, có một chút suy luận",
     "Khó": "vận dụng, phân tích, tình huống thực tế, phương án gây nhiễu hợp lý",
 }
+
+SAFE_RULE = (
+    "Nội dung phải phù hợp học sinh phổ thông: ngôn ngữ thân thiện, tích cực, "
+    "không bạo lực, không nội dung nhạy cảm hay người lớn."
+)
 
 
 def load_provider():
@@ -75,14 +131,15 @@ BASE_URL, API_KEY, MODEL, PROVIDER = load_provider()
 llm = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=90, max_retries=1)
 
 CHAT_SYSTEM = (
-    f"Bạn là trợ lý ôn tập môn {SUBJECT} cho học sinh. Trả lời bằng tiếng Việt, "
-    "giải thích dễ hiểu, có ví dụ đời sống khi phù hợp. Nếu không chắc chắn, hãy nói thẳng "
-    "thay vì đoán."
+    f"Bạn là trợ lý ôn tập môn {SUBJECT} cho học sinh, nói chuyện thân thiện như một người anh chị đi trước. "
+    "Trả lời bằng tiếng Việt, câu ngắn, dễ hiểu, dùng ví dụ gần gũi (trò chơi, thể thao, nấu ăn...). "
+    "Nếu không chắc chắn, hãy nói thẳng thay vì đoán. "
+    "Nếu câu hỏi không phù hợp với học sinh, hãy từ chối nhẹ nhàng và đưa câu chuyện về việc học."
 )
 PLAN_SYSTEM = (
-    "Bạn là cố vấn học tập. Hãy lập kế hoạch bằng tiếng Việt, định dạng Markdown, có cấu trúc: "
-    "mục tiêu, lịch theo tuần (và theo ngày nếu phù hợp), phương pháp ôn tập, cách tự kiểm tra "
-    "tiến độ, lưu ý. Nếu thiếu thông tin, hãy đưa ra giả định hợp lý và nêu rõ."
+    "Bạn là cố vấn học tập thân thiện cho học sinh. Hãy lập kế hoạch bằng tiếng Việt, định dạng Markdown, "
+    "có cấu trúc: mục tiêu, lịch theo tuần (và theo ngày nếu phù hợp), phương pháp ôn tập, cách tự kiểm tra "
+    "tiến độ, thời gian nghỉ ngơi hợp lý, lưu ý. Nếu thiếu thông tin, hãy đưa ra giả định hợp lý và nêu rõ."
 )
 
 # ======================================================================
@@ -153,7 +210,7 @@ def check_rate_limit():
         if len(_calls) >= RATE_LIMIT:
             raise UserFacingError(
                 "Hệ thống đang nhận quá nhiều yêu cầu, bạn thử lại sau ít phút nhé. "
-                "Trong lúc chờ, vẫn dùng được bộ câu hỏi mẫu và kế hoạch mẫu."
+                "Trong lúc chờ, vẫn dùng được bộ câu hỏi mẫu, thẻ mẫu và kế hoạch mẫu."
             )
         _calls.append(now)
 
@@ -343,6 +400,7 @@ def generate_questions(topic: str, count: int, difficulty: str, source_text) -> 
     prompt = f"""{context}
 
 Hãy tạo {count} câu hỏi trắc nghiệm bằng tiếng Việt. Mức độ: {difficulty} ({DIFFICULTY_HINTS.get(difficulty, "")}).
+{SAFE_RULE}
 Yêu cầu:
 - Mỗi câu có đúng 4 lựa chọn khác nhau và đúng 1 đáp án đúng; các câu không trùng ý nhau.
 - "explanation": giải thích ngắn gọn, KHÔNG nhắc tới chữ cái A/B/C/D.
@@ -377,20 +435,61 @@ Chỉ trả về JSON đúng định dạng sau, không thêm chữ nào khác:
         except Exception as e:
             last_error = e
             print(f"[Lỗi tạo quiz] {type(e).__name__}: {e}")
-    if last_error is not None and any(k in type(last_error).__name__ for k in ("Connection", "Timeout", "Authentication", "NotFound")):
+    if last_error is not None and any(
+        k in type(last_error).__name__ for k in ("Connection", "Timeout", "Authentication", "NotFound")
+    ):
         raise last_error
     raise UserFacingError("Không tạo được câu hỏi hợp lệ, bạn thử lại hoặc dùng bộ câu hỏi mẫu nhé.")
 
 
 # ======================================================================
-# TIẾN ĐỘ
+# HỒ SƠ NGƯỜI CHƠI: XP, CẤP ĐỘ, HUY HIỆU, TIẾN ĐỘ
 # ======================================================================
 def new_progress() -> dict:
-    return {"answers": [], "quizzes": []}
+    return {"answers": [], "quizzes": [], "xp": 0, "badges": [], "best_streak": 0, "cards_known": 0}
 
 
 def ensure_progress(p) -> dict:
-    return p if isinstance(p, dict) and "answers" in p and "quizzes" in p else new_progress()
+    if not isinstance(p, dict):
+        return new_progress()
+    for key, default in new_progress().items():
+        if key not in p:
+            p[key] = default.copy() if isinstance(default, list) else default
+    return p
+
+
+def level_of(xp: int):
+    """Trả về (chỉ số cấp, danh hiệu, linh thú, tên linh thú, mốc hiện tại, mốc kế tiếp hoặc None)."""
+    idx = max(i for i, lv in enumerate(LEVELS) if xp >= lv[0])
+    nxt = LEVELS[idx + 1][0] if idx + 1 < len(LEVELS) else None
+    return idx, LEVELS[idx][1], LEVELS[idx][2], LEVELS[idx][3], LEVELS[idx][0], nxt
+
+
+def xp_bar(xp: int) -> str:
+    _, _, _, _, floor, nxt = level_of(xp)
+    if nxt is None:
+        return "▰" * 10
+    filled = int((xp - floor) / (nxt - floor) * 10)
+    return "▰" * filled + "▱" * (10 - filled)
+
+
+def add_xp(progress: dict, amount: int) -> str:
+    """Cộng XP; trả về thông báo nếu lên cấp."""
+    before = level_of(progress["xp"])[0]
+    progress["xp"] += amount
+    idx, title, pet, pet_name, _, _ = level_of(progress["xp"])
+    if idx > before:
+        return f"\n\n🎉 **Lên cấp {idx + 1}!** Bạn trở thành *{title}*, linh thú tiến hóa thành {pet} {pet_name}!"
+    return ""
+
+
+def award(progress: dict, key: str) -> str:
+    """Trao huy hiệu (nếu chưa có) và thưởng XP."""
+    if key in progress["badges"]:
+        return ""
+    progress["badges"].append(key)
+    emoji, name, _ = BADGES[key]
+    return f"\n\n🏅 **Huy hiệu mới:** {emoji} {name} (+{BADGE_BONUS_XP} XP)" + add_xp(progress, BADGE_BONUS_XP)
 
 
 def topic_stats(progress: dict) -> dict:
@@ -409,15 +508,35 @@ def weak_topics(progress: dict, k: int = 5) -> list:
     return [tag for _, _, tag in ranked[:k]]
 
 
+def profile_md(p: dict) -> str:
+    idx, title, pet, pet_name, _, nxt = level_of(p["xp"])
+    remain = f"(còn {nxt - p['xp']} XP để lên cấp)" if nxt else "(cấp cao nhất!)"
+    lines = [
+        f"## {pet} {pet_name} · Cấp {idx + 1}: {title}",
+        f"⭐ **{p['xp']} XP** {xp_bar(p['xp'])} {remain}",
+        f"🔥 Chuỗi đúng dài nhất: **{p['best_streak']}**",
+        "",
+        "### Huy hiệu",
+    ]
+    for key, (emoji, name, desc) in BADGES.items():
+        if key in p["badges"]:
+            lines.append(f"- {emoji} **{name}**: {desc}")
+        else:
+            lines.append(f"- 🔒 {name}: {desc}")
+    return "\n".join(lines)
+
+
 def progress_md(progress) -> str:
     p = ensure_progress(progress)
+    parts = [profile_md(p), ""]
     if not p["answers"]:
-        return "Bạn chưa làm câu nào. Hãy làm một quiz ở tab **Quiz ôn tập** để xem thống kê tại đây."
+        parts.append("Bạn chưa làm câu nào. Hãy chơi một ván ở tab **Quiz ôn tập** để xem thống kê tại đây.")
+        return "\n".join(parts)
     total = len(p["answers"])
     correct = sum(1 for a in p["answers"] if a["ok"])
-    lines = [
+    parts += [
         "### Tổng quan",
-        f"- Số bài quiz đã hoàn thành: **{len(p['quizzes'])}**",
+        f"- Số ván đã hoàn thành: **{len(p['quizzes'])}**",
         f"- Số câu đã trả lời: **{total}**, đúng **{correct}** ({correct / total:.0%})",
         "",
         "### Theo chủ đề",
@@ -425,14 +544,14 @@ def progress_md(progress) -> str:
         "|---|---|---|",
     ]
     for tag, (c, t) in sorted(topic_stats(p).items(), key=lambda kv: (kv[1][0] / kv[1][1], -kv[1][1])):
-        lines.append(f"| {tag} | {c}/{t} | {c / t:.0%} |")
+        parts.append(f"| {tag} | {c}/{t} | {c / t:.0%} |")
     weak = weak_topics(p)
-    lines.append("")
+    parts.append("")
     if weak:
-        lines.append("**Nên ôn thêm:** " + ", ".join(weak))
+        parts.append("**Nên ôn thêm:** " + ", ".join(weak))
     else:
-        lines.append("**Tuyệt vời!** Chưa có chủ đề nào dưới 70%.")
-    return "\n".join(lines)
+        parts.append("**Tuyệt vời!** Chưa có chủ đề nào dưới 70%.")
+    return "\n".join(parts)
 
 
 def show_progress(progress):
@@ -444,28 +563,76 @@ def reset_progress():
 
 
 # ======================================================================
-# QUIZ: LUỒNG LÀM BÀI
+# QUIZ: LUỒNG CHƠI
 # ======================================================================
 def hide():
     return gr.update(visible=False)
 
 
-def pack(state, question="", choices=None, feedback="", check=None, nxt=None, retry=None, file=None):
+def pack(state, hud="", question="", choices=None, feedback="", check=None, hint=None, nxt=None, retry=None, file=None):
     """Gói kết quả theo đúng thứ tự các thành phần đầu ra của quiz."""
     return (
         state,
+        hud,
         question,
         choices if choices is not None else hide(),
         feedback,
         check if check is not None else hide(),
+        hint if hint is not None else hide(),
         nxt if nxt is not None else hide(),
         retry if retry is not None else hide(),
         file if file is not None else hide(),
     )
 
 
-def new_quiz_state(questions: list, topic: str) -> dict:
-    return {"questions": questions, "index": 0, "score": 0, "topic": topic, "log": [], "answered": False}
+def new_quiz_state(questions: list, topic: str, mode: str = MODE_BOSS, retry: bool = False) -> dict:
+    boss_hp = max(1, math.ceil(BOSS_HP_RATIO * len(questions)))
+    return {
+        "questions": questions,
+        "index": 0,
+        "score": 0,
+        "topic": topic,
+        "log": [],
+        "answered": False,
+        "finished": False,
+        "over": False,
+        "retry": retry,
+        "mode": "boss" if mode == MODE_BOSS else "practice",
+        "lives": MAX_LIVES,
+        "boss": random.choice(BOSSES),
+        "boss_hp": boss_hp,
+        "boss_hp_max": boss_hp,
+        "streak": 0,
+        "best_streak": 0,
+        "hints_left": HINTS_PER_QUIZ,
+        "hinted": False,
+        "xp": 0,
+    }
+
+
+def hud_md(state) -> str:
+    if not state:
+        return ""
+    parts = []
+    if state["mode"] == "boss":
+        hearts = "❤️" * state["lives"] + "🖤" * (MAX_LIVES - state["lives"])
+        bar = "🟥" * state["boss_hp"] + "⬛" * (state["boss_hp_max"] - state["boss_hp"])
+        parts.append(hearts)
+        parts.append(f"{state['boss']['emoji']} {state['boss']['name']}: {bar}")
+    parts.append(f"🔥 Chuỗi: {state['streak']}")
+    parts.append(f"⭐ +{state['xp']} XP")
+    parts.append(f"💡 ×{state['hints_left']}")
+    return "**" + "  ·  ".join(parts) + "**"
+
+
+def intro_text(state) -> str:
+    if state["mode"] == "boss":
+        return (
+            f"⚔️ **{state['boss']['name']}** {state['boss']['emoji']} xuất hiện! "
+            f"Mỗi câu đúng làm quái vật yếu đi, chuỗi 3 câu đúng gây đòn chí mạng. "
+            f"Bạn có {MAX_LIVES} mạng và {HINTS_PER_QUIZ} lượt gợi ý 50/50. Chúc may mắn!"
+        )
+    return f"📖 Chế độ luyện tập: không mất mạng, cứ thoải mái học nhé. Bạn có {HINTS_PER_QUIZ} lượt gợi ý 50/50."
 
 
 def labels_of(q: dict) -> list:
@@ -479,12 +646,19 @@ def show_question(state: dict):
     return text, radio
 
 
+def hint_update(state):
+    return gr.update(visible=state["hints_left"] > 0, value=f"💡 Gợi ý 50/50 (còn {state['hints_left']})")
+
+
 def begin(state: dict):
     question_md, radio = show_question(state)
-    return pack(state, question_md, radio, "", gr.update(visible=True))
+    return pack(
+        state, hud_md(state), question_md, radio, intro_text(state),
+        gr.update(visible=True), hint_update(state),
+    )
 
 
-def start_quiz(topic, count, difficulty, pasted, file_path):
+def start_quiz(topic, count, difficulty, mode, pasted, file_path):
     topic = (topic or "").strip()
     try:
         source, label = None, topic
@@ -496,36 +670,85 @@ def start_quiz(topic, count, difficulty, pasted, file_path):
             label = "Văn bản dán vào"
         questions = generate_questions(topic, int(count), difficulty, source)
     except Exception as e:
-        return pack(None, friendly_error(e))
-    return begin(new_quiz_state(questions, label or SUBJECT))
+        return pack(None, "", friendly_error(e))
+    return begin(new_quiz_state(questions, label or SUBJECT, mode))
 
 
-def start_sample(count):
+def start_sample(count, mode):
     bank = [normalize_question(q) for q in SAMPLE_BANK]
     questions = random.sample(bank, min(int(count), len(bank)))
-    return begin(new_quiz_state(questions, "Câu hỏi mẫu"))
+    return begin(new_quiz_state(questions, "Câu hỏi mẫu", mode))
+
+
+def use_hint(state):
+    """Gợi ý 50/50: loại bỏ 2 đáp án sai."""
+    keep4 = tuple(gr.update() for _ in range(3))
+    if not state or state.get("answered") or state.get("finished"):
+        return (state,) + keep4 + (gr.update(),)
+    if state["hinted"]:
+        return state, hud_md(state), "💡 Câu này đã dùng gợi ý rồi.", gr.update(), gr.update()
+    if state["hints_left"] <= 0:
+        return state, hud_md(state), "💡 Bạn đã hết lượt gợi ý.", gr.update(), hint_update(state)
+    q = state["questions"][state["index"]]
+    wrong = [i for i in range(4) if i != q["answer"]]
+    removed = set(random.sample(wrong, 2))
+    labels = labels_of(q)
+    remaining = [labels[i] for i in range(4) if i not in removed]
+    state["hints_left"] -= 1
+    state["hinted"] = True
+    return (
+        state,
+        hud_md(state),
+        "💡 Đã loại bỏ 2 đáp án sai! (câu này nhận ít XP hơn)",
+        gr.update(choices=remaining, value=None),
+        hint_update(state),
+    )
 
 
 def check_answer(state, progress, choice):
-    keep = (gr.update(), gr.update(), gr.update(), gr.update())
     progress = ensure_progress(progress)
     if not state:
-        return (state, progress, "Hãy tạo quiz trước.") + keep[1:]
-    if state.get("answered"):
-        return (state, progress) + keep
+        return (state, progress, gr.update(), "Hãy tạo quiz trước.") + tuple(gr.update() for _ in range(4))
+    if state.get("answered") or state.get("finished"):
+        return (state, progress) + tuple(gr.update() for _ in range(6))
     q = state["questions"][state["index"]]
     labels = labels_of(q)
     if choice not in labels:
-        return (state, progress, "👆 Hãy chọn một đáp án trước.") + keep[1:]
+        return (state, progress, gr.update(), "👆 Hãy chọn một đáp án trước.") + tuple(gr.update() for _ in range(4))
 
     chosen = labels.index(choice)
     ok = chosen == q["answer"]
     state["answered"] = True
+    extra = ""
     if ok:
         state["score"] += 1
-        verdict = "✅ **Đúng rồi!**"
+        state["streak"] += 1
+        state["best_streak"] = max(state["best_streak"], state["streak"])
+        progress["best_streak"] = max(progress["best_streak"], state["streak"])
+        gained = 5 if state["hinted"] else 10
+        combo = 10 if state["streak"] >= 5 else 5 if state["streak"] >= 3 else 0
+        gained += combo
+        state["xp"] += gained
+        verdict = f"✅ **{random.choice(CORRECT_MSGS)}** +{gained} XP"
+        if combo:
+            verdict += f" (thưởng chuỗi {state['streak']} câu 🔥)"
+        if state["mode"] == "boss":
+            damage = 2 if state["streak"] >= 3 else 1
+            state["boss_hp"] = max(0, state["boss_hp"] - damage)
+            verdict += "\n\n💥 Đòn chí mạng!" if damage == 2 else "\n\n💥 Quái vật bị thương!"
+        extra += add_xp(progress, gained)
+        if state["streak"] >= 3:
+            extra += award(progress, "streak3")
+        if state["streak"] >= 5:
+            extra += award(progress, "streak5")
     else:
-        verdict = f"❌ **Chưa đúng.** Đáp án đúng: {LETTERS[q['answer']]}. {q['options'][q['answer']]}"
+        state["streak"] = 0
+        verdict = f"❌ **{random.choice(WRONG_MSGS)}** Đáp án đúng: {LETTERS[q['answer']]}. {q['options'][q['answer']]}"
+        if state["mode"] == "boss":
+            state["lives"] -= 1
+            verdict += f"\n\n💔 Mất 1 mạng, còn {max(state['lives'], 0)} mạng."
+            if state["lives"] <= 0:
+                state["over"] = True
     state["log"].append({"q": q, "chosen": chosen, "ok": ok})
 
     tag = (q.get("tag") or state["topic"]).replace("|", "/")
@@ -538,13 +761,16 @@ def check_answer(state, progress, choice):
         feedback += "\n\n⚠️ Chưa xác minh được câu này với tài liệu, hãy tự đối chiếu."
     if q.get("tag"):
         feedback += f"\n\n🏷️ Chủ đề: {q['tag']}"
+    feedback += extra
 
-    is_last = state["index"] == len(state["questions"]) - 1
+    is_last = state["index"] == len(state["questions"]) - 1 or state["over"]
     return (
         state,
         progress,
+        hud_md(state),
         feedback,
         gr.update(interactive=False),
+        hide(),
         hide(),
         gr.update(visible=True, value="Xem kết quả 🏁" if is_last else "Câu tiếp ▶"),
     )
@@ -572,43 +798,107 @@ def build_report(state: dict) -> str:
         if q.get("explanation"):
             lines.append(f"\n*Giải thích:* {q['explanation']}")
         lines.append("")
+    pending = state["questions"][len(state["log"]):]
+    if pending:
+        lines.append("## Các câu chưa làm (để tự ôn)")
+        for q in pending:
+            lines.append(f"- {q['question']} → **{q['options'][q['answer']]}**")
     return "\n".join(lines)
 
 
-def next_question(state, progress):
-    progress = ensure_progress(progress)
-    if not state or not state.get("answered"):
-        return (state, progress) + tuple(gr.update() for _ in range(7))
-
-    state["index"] += 1
-    state["answered"] = False
-
-    if state["index"] < len(state["questions"]):
-        question_md, radio = show_question(state)
-        return (state, progress, question_md, radio, "", gr.update(visible=True), hide(), hide(), hide())
-
+def finish_quiz(state: dict, progress: dict) -> str:
+    """Tổng kết ván chơi: cộng thưởng, trao huy hiệu, tạo thông báo."""
     total = len(state["questions"])
-    ratio = state["score"] / total
-    comment = "Xuất sắc! 🎉" if ratio == 1 else "Khá tốt, cố thêm chút nữa nhé!" if ratio >= 0.7 else "Hãy ôn lại các phần còn yếu rồi thử lại nhé!"
-    progress["quizzes"].append({"topic": state["topic"], "score": state["score"], "total": total, "ts": time.time()})
+    score = state["score"]
+    completed = len(state["log"]) == total
+    perfect = completed and score == total and total >= 3
+    won = state["mode"] == "boss" and not state["over"] and state["boss_hp"] <= 0
 
+    bonus = 5
+    if perfect:
+        bonus += 20
+    if won:
+        bonus += 30
+    state["xp"] += bonus
+    extra = add_xp(progress, bonus)
+    progress["quizzes"].append({"topic": state["topic"], "score": score, "total": total, "ts": time.time()})
+    extra += award(progress, "first_quiz")
+    if len(progress["quizzes"]) >= 3:
+        extra += award(progress, "marathon")
+    if perfect:
+        extra += award(progress, "perfect")
+    if won:
+        extra += award(progress, "boss_win")
+    if state["retry"] and completed and score == total:
+        extra += award(progress, "comeback")
+    if len({a["tag"] for a in progress["answers"]}) >= 5:
+        extra += award(progress, "explorer")
+
+    boss = state["boss"]
+    if state["mode"] == "boss":
+        if won:
+            head = f"## 🏆 Chiến thắng! Bạn đã đánh bại {boss['name']} {boss['emoji']}"
+        elif state["over"]:
+            head = (
+                f"## 💫 Hết mạng rồi! {boss['name']} thắng ván này, nhưng bạn đã học được rất nhiều. "
+                "Thử lại nhé!"
+            )
+        else:
+            head = (
+                f"## 😅 {boss['name']} vẫn còn sức! Cần đúng khoảng {int(BOSS_HP_RATIO * 100)}% số câu "
+                "để chiến thắng. Thử lại nhé!"
+            )
+    else:
+        ratio = score / total
+        comment = "Xuất sắc! 🎉" if ratio == 1 else "Khá tốt, cố thêm chút nữa nhé!" if ratio >= 0.7 else "Hãy ôn lại các phần còn yếu rồi thử lại nhé!"
+        head = f"## 🏁 Kết quả: {score}/{total}. {comment}"
+
+    result = f"{head}\n\n**Điểm:** {score}/{total} · **XP ván này:** +{state['xp']} · **Chuỗi tốt nhất:** {state['best_streak']}"
     wrong = [e for e in state["log"] if not e["ok"]]
-    result = f"## 🏁 Kết quả: {state['score']}/{total}\n{comment}"
     if wrong:
         result += "\n\n**Các câu cần ôn lại:**\n"
         for e in wrong[:10]:
             q = e["q"]
             result += f"- {q['question']} → **{q['options'][q['answer']]}**\n"
+    pending = total - len(state["log"])
+    if pending:
+        result += f"\n\nCòn {pending} câu chưa làm, đáp án có trong báo cáo tải về để bạn tự ôn."
+    result += extra
+    if len(progress["quizzes"]) % REST_EVERY == 0:
+        result += "\n\n💧 Bạn đã chơi khá nhiều ván rồi! Hãy nghỉ 5 phút, uống nước và vận động nhẹ cho đỡ mỏi mắt nhé."
+    return result
+
+
+def next_question(state, progress):
+    progress = ensure_progress(progress)
+    if not state or not state.get("answered") or state.get("finished"):
+        return (state, progress) + tuple(gr.update() for _ in range(9))
+
+    if not state["over"] and state["index"] < len(state["questions"]) - 1:
+        state["index"] += 1
+        state["answered"] = False
+        state["hinted"] = False
+        question_md, radio = show_question(state)
+        return (
+            state, progress, hud_md(state), question_md, radio, "",
+            gr.update(visible=True), hint_update(state), hide(), hide(), hide(),
+        )
+
+    state["finished"] = True
+    result = finish_quiz(state, progress)
+    has_wrong = any(not e["ok"] for e in state["log"])
     path = write_temp(build_report(state), "ketqua")
     return (
         state,
         progress,
+        hud_md(state),
         result,
         hide(),
         "",
         hide(),
         hide(),
-        gr.update(visible=bool(wrong)),
+        hide(),
+        gr.update(visible=has_wrong),
         gr.update(value=path, visible=True),
     )
 
@@ -617,9 +907,102 @@ def retry_wrong(state):
     wrong = [e["q"] for e in (state or {}).get("log", []) if not e["ok"]]
     questions = [q for q in (normalize_question(q) for q in wrong) if q]
     if not questions:
-        return pack(state, "Không có câu sai để ôn lại.")
+        return pack(state, hud_md(state), "Không có câu sai để ôn lại.")
     base = str(state["topic"]).replace(" (ôn câu sai)", "")
-    return begin(new_quiz_state(questions, f"{base} (ôn câu sai)"))
+    mode = MODE_BOSS if state["mode"] == "boss" else MODE_PRACTICE
+    return begin(new_quiz_state(questions, f"{base} (ôn câu sai)", mode, retry=True))
+
+
+# ======================================================================
+# THẺ GHI NHỚ
+# ======================================================================
+def cpack(state, card="", flip=None, know=None, again=None):
+    return (
+        state,
+        card,
+        flip if flip is not None else hide(),
+        know if know is not None else hide(),
+        again if again is not None else hide(),
+    )
+
+
+def questions_to_cards(questions: list) -> list:
+    return [
+        {
+            "front": q["question"],
+            "back": f"**{q['options'][q['answer']]}**\n\n{q['explanation']}".strip(),
+            "tag": q.get("tag", ""),
+        }
+        for q in questions
+    ]
+
+
+def card_md(cs: dict, flipped: bool) -> str:
+    card = cs["cards"][cs["queue"][0]]
+    head = f"Thẻ còn lại: **{len(cs['queue'])}** · Đã nhớ: **{cs['known']}/{cs['total']}**\n\n"
+    if flipped:
+        return head + f"### 🃏 Đáp án\n{card['back']}"
+    return head + f"### 🃏 Câu hỏi\n{card['front']}"
+
+
+def cards_begin(cards: list):
+    if not cards:
+        return cpack(None, "Không có thẻ nào để học.")
+    cs = {"cards": cards, "queue": list(range(len(cards))), "known": 0, "total": len(cards), "flipped": False}
+    return cpack(cs, card_md(cs, False), flip=gr.update(visible=True))
+
+
+def start_cards(topic, count):
+    try:
+        questions = generate_questions((topic or "").strip(), int(count), "Vừa", None)
+    except Exception as e:
+        return cpack(None, friendly_error(e))
+    return cards_begin(questions_to_cards(questions))
+
+
+def start_cards_sample(count):
+    bank = [normalize_question(q) for q in SAMPLE_BANK]
+    return cards_begin(questions_to_cards(random.sample(bank, min(int(count), len(bank)))))
+
+
+def cards_from_quiz(quiz_state):
+    if not quiz_state or not quiz_state.get("questions"):
+        return cpack(None, "Hãy chơi một quiz trước, rồi quay lại đây để biến các câu hỏi thành thẻ ghi nhớ.")
+    return cards_begin(questions_to_cards(quiz_state["questions"]))
+
+
+def card_flip(cs):
+    if not cs or not cs["queue"] or cs["flipped"]:
+        return (cs,) + tuple(gr.update() for _ in range(4))
+    cs["flipped"] = True
+    return cpack(cs, card_md(cs, True), know=gr.update(visible=True), again=gr.update(visible=True))
+
+
+def card_again(cs):
+    if not cs or not cs["queue"] or not cs["flipped"]:
+        return (cs,) + tuple(gr.update() for _ in range(4))
+    cs["queue"].append(cs["queue"].pop(0))  # thẻ chưa nhớ quay lại cuối hàng
+    cs["flipped"] = False
+    return cpack(cs, card_md(cs, False), flip=gr.update(visible=True))
+
+
+def card_know(cs, progress):
+    progress = ensure_progress(progress)
+    if not cs or not cs["queue"] or not cs["flipped"]:
+        return (cs, progress) + tuple(gr.update() for _ in range(4))
+    cs["queue"].pop(0)
+    cs["known"] += 1
+    progress["cards_known"] += 1
+    extra = add_xp(progress, 2)
+    if progress["cards_known"] >= 10:
+        extra += award(progress, "cards")
+    if cs["queue"]:
+        cs["flipped"] = False
+        out = cpack(cs, card_md(cs, False) + extra, flip=gr.update(visible=True))
+    else:
+        extra += add_xp(progress, 10)
+        out = cpack(cs, f"## 🎉 Bạn đã nhớ hết {cs['total']} thẻ! (+10 XP thưởng hoàn thành){extra}")
+    return (out[0], progress) + out[1:]
 
 
 # ======================================================================
@@ -644,8 +1027,8 @@ def offline_plan(goal: str, weeks: int, hours: float, level: str, weak: list) ->
             f"### Tuần {w}: {phase}. Trọng tâm: {focus[(w - 1) % len(focus)]}",
             f"- Thứ 2, 4, 6: học lý thuyết và làm ví dụ (khoảng {hours:g} giờ mỗi ngày)",
             "- Thứ 3, 5: làm bài tập và ghi lại các câu sai",
-            "- Thứ 7: làm quiz tự kiểm tra 10 câu bằng ứng dụng này, rồi ôn lại câu sai",
-            "- Chủ nhật: nghỉ nhẹ hoặc xem lại ghi chú, sơ đồ tư duy",
+            "- Thứ 7: chơi một ván đấu quái vật 10 câu để tự kiểm tra, rồi ôn lại câu sai",
+            "- Chủ nhật: nghỉ ngơi, xem lại ghi chú hoặc sơ đồ tư duy",
             "",
         ]
     return "\n".join(lines)
@@ -697,7 +1080,7 @@ def build_ui():
         progress = gr.State(None)
 
         gr.Markdown(
-            f"# 📚 StudyBuddy: trợ lý ôn tập {SUBJECT}\n"
+            f"# 📚 StudyBuddy: học mà chơi, môn {SUBJECT}\n"
             f"Mô hình mở: `{MODEL}` · Chạy qua: **{PROVIDER}**"
         )
         with gr.Row():
@@ -706,50 +1089,86 @@ def build_ui():
         test_btn.click(test_ai, None, status)
 
         # ---------------- Quiz
-        with gr.Tab("📝 Quiz ôn tập"):
+        with gr.Tab("🎮 Quiz ôn tập"):
             with gr.Row():
                 topic = gr.Textbox(label="Chủ đề", placeholder="Ví dụ: Lực và chuyển động", scale=3)
                 count = gr.Slider(1, 10, value=5, step=1, label="Số câu", scale=1)
                 difficulty = gr.Dropdown(["Dễ", "Vừa", "Khó"], value="Vừa", label="Mức độ", scale=1)
+            mode = gr.Dropdown([MODE_BOSS, MODE_PRACTICE], value=MODE_BOSS, label="Chế độ chơi")
             pasted = gr.Textbox(
                 label="Hoặc dán nội dung bài học vào đây (nếu có, câu hỏi sẽ dựa trên đoạn này)",
                 lines=4,
             )
             file_in = gr.File(label="Hoặc tải tài liệu (.txt, .md, .pdf)", type="filepath")
             with gr.Row():
-                start_btn = gr.Button("Tạo quiz bằng AI", variant="primary")
-                sample_btn = gr.Button("Bộ câu hỏi mẫu (không cần AI)")
+                start_btn = gr.Button("Bắt đầu chơi (AI tạo câu hỏi)", variant="primary")
+                sample_btn = gr.Button("Chơi với câu hỏi mẫu (không cần AI)")
 
             quiz_state = gr.State()
+            hud = gr.Markdown()
             question_md = gr.Markdown()
             choices = gr.Radio(label="Chọn đáp án", visible=False)
             feedback = gr.Markdown()
-            check_btn = gr.Button("Kiểm tra", variant="primary", visible=False)
+            with gr.Row():
+                check_btn = gr.Button("Kiểm tra", variant="primary", visible=False)
+                hint_btn = gr.Button("💡 Gợi ý 50/50", visible=False)
             next_btn = gr.Button("Câu tiếp ▶", visible=False)
             retry_btn = gr.Button("🔁 Ôn lại các câu sai", visible=False)
             result_file = gr.File(label="Tải báo cáo kết quả (.md)", visible=False)
 
-            quiz_outputs = [quiz_state, question_md, choices, feedback, check_btn, next_btn, retry_btn, result_file]
-            start_btn.click(start_quiz, [topic, count, difficulty, pasted, file_in], quiz_outputs)
-            sample_btn.click(start_sample, [count], quiz_outputs)
+            quiz_outputs = [
+                quiz_state, hud, question_md, choices, feedback,
+                check_btn, hint_btn, next_btn, retry_btn, result_file,
+            ]
+            start_btn.click(start_quiz, [topic, count, difficulty, mode, pasted, file_in], quiz_outputs)
+            sample_btn.click(start_sample, [count, mode], quiz_outputs)
             check_btn.click(
                 check_answer,
                 [quiz_state, progress, choices],
-                [quiz_state, progress, feedback, choices, check_btn, next_btn],
+                [quiz_state, progress, hud, feedback, choices, check_btn, hint_btn, next_btn],
             )
+            hint_btn.click(use_hint, [quiz_state], [quiz_state, hud, feedback, choices, hint_btn])
             next_btn.click(
                 next_question,
                 [quiz_state, progress],
-                [quiz_state, progress, question_md, choices, feedback, check_btn, next_btn, retry_btn, result_file],
+                [quiz_state, progress, hud, question_md, choices, feedback,
+                 check_btn, hint_btn, next_btn, retry_btn, result_file],
             )
             retry_btn.click(retry_wrong, [quiz_state], quiz_outputs)
 
-        # ---------------- Tiến độ
-        with gr.Tab("📊 Tiến độ") as tab_progress:
+        # ---------------- Thẻ ghi nhớ
+        with gr.Tab("🃏 Thẻ ghi nhớ"):
+            gr.Markdown(
+                "Lật thẻ, tự đánh giá **Nhớ rồi** hoặc **Chưa nhớ**. Thẻ chưa nhớ sẽ quay lại sau để bạn ôn tiếp."
+            )
+            with gr.Row():
+                cards_topic = gr.Textbox(label="Chủ đề", placeholder="Ví dụ: Tế bào", scale=3)
+                cards_count = gr.Slider(3, 10, value=5, step=1, label="Số thẻ", scale=1)
+            with gr.Row():
+                cards_ai_btn = gr.Button("Tạo thẻ bằng AI", variant="primary")
+                cards_sample_btn = gr.Button("Thẻ mẫu (không cần AI)")
+                cards_quiz_btn = gr.Button("Từ quiz vừa chơi")
+            cards_state = gr.State()
+            card_out = gr.Markdown()
+            with gr.Row():
+                flip_btn = gr.Button("🔄 Lật thẻ", visible=False)
+                know_btn = gr.Button("✅ Nhớ rồi", visible=False)
+                again_btn = gr.Button("🔁 Chưa nhớ", visible=False)
+
+            card_outputs = [cards_state, card_out, flip_btn, know_btn, again_btn]
+            cards_ai_btn.click(start_cards, [cards_topic, cards_count], card_outputs)
+            cards_sample_btn.click(start_cards_sample, [cards_count], card_outputs)
+            cards_quiz_btn.click(cards_from_quiz, [quiz_state], card_outputs)
+            flip_btn.click(card_flip, [cards_state], card_outputs)
+            know_btn.click(card_know, [cards_state, progress], [cards_state, progress, card_out, flip_btn, know_btn, again_btn])
+            again_btn.click(card_again, [cards_state], card_outputs)
+
+        # ---------------- Hồ sơ và tiến độ
+        with gr.Tab("🏆 Hồ sơ & tiến độ") as tab_progress:
             progress_out = gr.Markdown(progress_md(None))
             with gr.Row():
                 refresh_btn = gr.Button("Cập nhật")
-                reset_btn = gr.Button("Xóa dữ liệu tiến độ")
+                reset_btn = gr.Button("Xóa dữ liệu và chơi lại từ đầu")
             refresh_btn.click(show_progress, [progress], progress_out)
             reset_btn.click(reset_progress, None, [progress, progress_out])
             try:
@@ -781,7 +1200,10 @@ def build_ui():
             except TypeError:  # phiên bản Gradio mới không còn tham số type
                 gr.ChatInterface(chat_fn, examples=CHAT_EXAMPLES)
 
-        gr.Markdown("<small>Lưu ý: AI có thể sai. Hãy đối chiếu đáp án với sách giáo khoa hoặc giáo viên.</small>")
+        gr.Markdown(
+            "<small>Lưu ý: AI có thể sai. Hãy đối chiếu đáp án với sách giáo khoa hoặc giáo viên. "
+            "Ứng dụng không lưu thông tin cá nhân; điểm và huy hiệu chỉ tồn tại trong phiên chơi này.</small>"
+        )
     return demo
 
 
