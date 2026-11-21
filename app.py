@@ -2,7 +2,8 @@
 StudyBuddy: trợ lý ôn tập AI mã nguồn mở, học mà chơi (Gradio + mô hình Llama qua Groq hoặc Ollama)
 
 Học tập:
-- Quiz trắc nghiệm tạo từ chủ đề, nội dung dán vào hoặc file .txt/.md/.pdf.
+- Quiz trắc nghiệm tạo từ chủ đề, nội dung dán vào, file .txt/.md/.pdf hoặc ảnh chụp trang sách/vở
+  (.png, .jpg, .jpeg, .jfif, .webp, .gif, .bmp, .tif, .tiff, .heic; AI đọc chữ trong ảnh).
   Với tài liệu, mỗi câu kèm trích dẫn nguyên văn và được kiểm tra có thật trong tài liệu hay không.
 - Giải thích, ôn lại câu sai, báo cáo kết quả, theo dõi tiến độ theo chủ đề, kế hoạch học tập, hỏi đáp.
 
@@ -70,6 +71,10 @@ SAMPLE_DEFAULT_SUBJECT = "Khoa học tự nhiên"  # môn của các câu mẫu 
 MAX_HISTORY = 6
 MAX_INPUT_CHARS = 2000
 MAX_FILE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_BYTES = 10 * 1024 * 1024  # ảnh chụp từ điện thoại thường lớn hơn file văn bản
+MAX_IMAGE_SIDE = 1600  # thu nhỏ ảnh trước khi gửi cho AI để nhanh và nhẹ
+DOC_EXTS = (".txt", ".md", ".pdf")
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".jfif", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif")
 MAX_DOC_CHARS = 300_000
 MAX_SOURCE_CHARS = 12_000  # lượng chữ gửi cho AI mỗi lần tạo quiz
 MAX_PDF_PAGES = 40
@@ -182,6 +187,27 @@ def load_provider():
 
 BASE_URL, API_KEY, MODEL, PROVIDER = load_provider()
 llm = OpenAI(base_url=BASE_URL, api_key=API_KEY, timeout=90, max_retries=1)
+
+
+def load_vision_model() -> str:
+    """Mô hình có khả năng đọc ảnh. Đổi bằng biến môi trường LLM_VISION_MODEL nếu tên mặc định không còn."""
+    if os.getenv("LLM_VISION_MODEL"):
+        return os.environ["LLM_VISION_MODEL"]
+    if PROVIDER.startswith("Groq"):
+        return "meta-llama/llama-4-scout-17b-16e-instruct"
+    if PROVIDER.startswith("Ollama"):
+        return "llama3.2-vision"
+    return MODEL
+
+
+VISION_MODEL = load_vision_model()
+
+try:  # tùy chọn: mở được ảnh .heic/.heif chụp từ iPhone nếu đã cài pillow-heif
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except Exception:
+    pass
 
 def chat_system(subject=None, grade=None) -> str:
     who = f"học sinh {grade}" if grade else "học sinh"
@@ -336,9 +362,9 @@ def check_rate_limit():
         _calls.append(now)
 
 
-def ask_llm(messages, json_mode=False, max_tokens=2000, temperature=0.7) -> str:
+def ask_llm(messages, json_mode=False, max_tokens=2000, temperature=0.7, model=None) -> str:
     check_rate_limit()
-    kwargs = dict(model=MODEL, messages=messages, max_tokens=max_tokens, temperature=temperature)
+    kwargs = dict(model=model or MODEL, messages=messages, max_tokens=max_tokens, temperature=temperature)
     try:
         if json_mode:
             response = llm.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
@@ -442,10 +468,84 @@ def verify_evidence(evidence: str, source: str) -> bool:
     return len(e) >= 10 and e in _norm(source)
 
 
+def image_to_data_url(path: str) -> str:
+    """Đổi ảnh bất kỳ định dạng nào thành JPEG đã thu nhỏ, mã hóa base64 để gửi cho AI."""
+    import base64
+    import io
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as im:
+            im = ImageOps.exif_transpose(im)  # xoay đúng chiều ảnh chụp từ điện thoại
+            if getattr(im, "is_animated", False):
+                im.seek(0)  # GIF động: lấy khung đầu tiên
+            if im.mode in ("RGBA", "LA", "P"):
+                im = im.convert("RGBA")
+                bg = Image.new("RGB", im.size, "white")
+                bg.paste(im, mask=im.split()[-1])
+                im = bg
+            else:
+                im = im.convert("RGB")
+            im.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    except ImportError:
+        mime = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif"}.get(
+            os.path.splitext(path.lower())[1], "image/jpeg"
+        )
+        with open(path, "rb") as f:
+            return f"data:{mime};base64," + base64.b64encode(f.read()).decode()
+    except Exception:
+        raise UserFacingError(
+            "Không mở được ảnh này. Bạn thử chụp lại hoặc lưu ảnh dưới dạng JPG/PNG rồi tải lên nhé."
+        )
+
+
+def read_image(path: str) -> str:
+    """Nhờ mô hình AI có khả năng đọc ảnh chép lại nội dung trong ảnh thành văn bản."""
+    data_url = image_to_data_url(path)
+    prompt = (
+        "Đây là ảnh chụp trang sách, vở, ghi chú hoặc bài học của học sinh. "
+        "Hãy chép lại NGUYÊN VĂN toàn bộ chữ nhìn thấy trong ảnh (giữ nguyên ngôn ngữ gốc, công thức viết dạng chữ). "
+        "Nếu ảnh có hình vẽ, sơ đồ hoặc bảng, hãy mô tả ngắn gọn kiến thức mà chúng thể hiện. "
+        "Chỉ trả về nội dung, không bình luận thêm. Nếu ảnh không có nội dung học tập, hãy trả lời đúng một từ: KHONG"
+    )
+    try:
+        text = ask_llm(
+            [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]}],
+            max_tokens=2500,
+            temperature=0,
+            model=VISION_MODEL,
+        )
+    except Exception as e:
+        name = type(e).__name__
+        if any(k in name for k in ("BadRequest", "NotFound", "UnprocessableEntity")):
+            raise UserFacingError(
+                f"Mô hình `{VISION_MODEL}` không đọc được ảnh. Hãy đặt biến LLM_VISION_MODEL thành một mô hình "
+                "có hỗ trợ ảnh (ví dụ llama3.2-vision với Ollama), hoặc dán nội dung bài học vào ô văn bản."
+            )
+        raise
+    text = (text or "").strip()
+    if len(text) < 20 or text.upper().strip(". ") == "KHONG":
+        raise UserFacingError(
+            "Không đọc được nội dung học tập trong ảnh. Hãy chụp rõ hơn, đủ sáng, thẳng trang rồi thử lại nhé."
+        )
+    return text[:MAX_DOC_CHARS]
+
+
 def read_file(path: str) -> str:
+    lower = path.lower()
+    if lower.endswith(IMAGE_EXTS):
+        if os.path.getsize(path) > MAX_IMAGE_BYTES:
+            raise UserFacingError("Ảnh quá lớn (tối đa 10 MB).")
+        return read_image(path)
     if os.path.getsize(path) > MAX_FILE_BYTES:
         raise UserFacingError("File quá lớn (tối đa 5 MB).")
-    lower = path.lower()
     if lower.endswith(".pdf"):
         reader = PdfReader(path)
         text = "\n".join((p.extract_text() or "") for p in reader.pages[:MAX_PDF_PAGES])
@@ -453,10 +553,14 @@ def read_file(path: str) -> str:
         with open(path, encoding="utf-8", errors="ignore") as f:
             text = f.read()
     else:
-        raise UserFacingError("Chỉ hỗ trợ file .txt, .md hoặc .pdf.")
+        raise UserFacingError(
+            "Chỉ hỗ trợ file .txt, .md, .pdf hoặc ảnh (.png, .jpg, .jpeg, .jfif, .webp, .gif, .bmp, .tif, .tiff, .heic)."
+        )
     text = text.strip()
     if not text:
-        raise UserFacingError("Không đọc được nội dung file (có thể là PDF dạng ảnh scan).")
+        raise UserFacingError(
+            "Không đọc được nội dung file (có thể là PDF dạng ảnh scan). Bạn thử chụp ảnh từng trang rồi tải ảnh lên nhé."
+        )
     return text[:MAX_DOC_CHARS]
 
 
@@ -1623,7 +1727,10 @@ def build_ui():
                         label="Hoặc dán nội dung bài học vào đây (nếu có, câu hỏi sẽ dựa trên đoạn này)",
                         lines=4,
                     )
-                    file_in = gr.File(label="Hoặc tải tài liệu (.txt, .md, .pdf)", type="filepath")
+                    file_in = gr.File(
+                        label="Hoặc tải tài liệu / ảnh chụp bài (.txt, .md, .pdf, .png, .jpg, .jpeg, .webp, .gif, .bmp, .tiff, .heic)",
+                        type="filepath",
+                    )
 
             hud = gr.HTML()
             question_md = gr.Markdown()
@@ -1762,6 +1869,7 @@ def build_ui():
 
         gr.Markdown(
             "<small>Lưu ý: AI có thể sai. Hãy đối chiếu đáp án với sách giáo khoa hoặc giáo viên. "
+            "Ảnh bạn tải lên chỉ dùng để đọc chữ và không được lưu lại; hãy tránh chụp phần có tên, số điện thoại hay địa chỉ. "
             "Ứng dụng không thu thập thông tin cá nhân; điểm, huy hiệu và sổ tay lỗi sai được lưu "
             "trong trình duyệt của bạn trên thiết bị này (hoặc chỉ trong phiên chơi nếu trình duyệt không hỗ trợ).</small>"
         )
