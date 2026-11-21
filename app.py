@@ -874,7 +874,7 @@ def profile_md(p: dict) -> str:
     idx, title, pet, pet_name, _, nxt = level_of(p["xp"])
     remain = f"(còn {nxt - p['xp']} XP để lên cấp)" if nxt else "(cấp cao nhất!)"
     lines = [
-        f"## {pet} {pet_name} · Cấp {idx + 1}: {title}",
+        f'<div class="pet">{pet}</div>\n\n## {pet_name} · Cấp {idx + 1}: {title}',
         f"⭐ **{p['xp']} XP** {xp_bar(p['xp'])} {remain}",
         f"🔥 Chuỗi đúng dài nhất: **{p['best_streak']}**",
         f"🗺️ Màn cao nhất đã vượt: **{p['best_round']}**",
@@ -993,11 +993,108 @@ def new_quiz_state(
         "best_streak": 0,
         "hints_left": HINTS_PER_QUIZ,
         "hinted": False,
+        "last": None,  # kết quả câu vừa trả lời: hit / miss (để quái vật phản ứng)
         "xp": 0,
         "round": round_no,
         "cleared": cleared,  # đã vượt màn này (để biết "Ván tiếp theo" có lên màn mới không)
         "ctx": ctx,
     }
+
+
+# ======================================================================
+# HÌNH ẢNH: QUÁI VẬT VẼ BẰNG SVG (không cần file ảnh ngoài, chạy được ở mọi nơi)
+# ======================================================================
+def _face(lx, rx, ey, my, mood, ink="#1e1b4b"):
+    """Khuôn mặt quái vật theo tâm trạng: calm (hung hăng), hurt (đau), dead (bị hạ)."""
+    mid = (lx + rx) / 2
+    st = f'stroke="{ink}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"'
+    if mood == "dead":
+        eyes = "".join(f'<path d="M{x - 5} {ey - 5}l10 10m0 -10l-10 10" {st}/>' for x in (lx, rx))
+        mouth = f'<path d="M{mid - 9} {my}h18" {st}/><path d="M{mid + 2} {my}v7" stroke="#f472b6" stroke-width="4" stroke-linecap="round"/>'
+    elif mood == "hurt":
+        eyes = (
+            f'<path d="M{lx - 6} {ey - 5}l8 5l-8 5" {st}/>'
+            f'<path d="M{rx + 6} {ey - 5}l-8 5l8 5" {st}/>'
+        )
+        mouth = f'<path d="M{mid - 10} {my}q5 -6 10 0t10 0" {st}/>'
+    else:
+        eyes = "".join(
+            f'<circle cx="{x}" cy="{ey}" r="7" fill="#fff" stroke="{ink}" stroke-width="2"/>'
+            f'<circle cx="{x}" cy="{ey + 1}" r="3" fill="{ink}"/>'
+            for x in (lx, rx)
+        )
+        eyes += (
+            f'<path d="M{lx - 8} {ey - 11}l16 4" {st}/>'
+            f'<path d="M{rx + 8} {ey - 11}l-16 4" {st}/>'
+        )
+        mouth = f'<path d="M{mid - 11} {my}q11 10 22 0z" stroke="{ink}" stroke-width="2.5" stroke-linejoin="round" fill="#fff"/>'
+    return eyes + mouth
+
+
+def boss_svg(idx: int, mood: str) -> str:
+    """Vẽ quái vật thứ idx (khớp với danh sách BOSSES) với tâm trạng mood."""
+    if idx == 1:  # Bóng ma Đãng Trí
+        body = (
+            '<path d="M25 100V55a35 35 0 0 1 70 0V100l-12-9-11 9-12-9-12 9-11-9-12 9Z" '
+            'fill="#f1f5f9" stroke="#94a3b8" stroke-width="3" stroke-linejoin="round"/>'
+        )
+        face = _face(47, 73, 58, 78, mood, "#334155")
+    elif idx == 2:  # Robot Nhầm Lẫn
+        body = (
+            '<line x1="60" y1="36" x2="60" y2="20" stroke="#64748b" stroke-width="4"/>'
+            '<circle cx="60" cy="16" r="6" fill="#ef4444"/>'
+            '<rect x="18" y="56" width="8" height="20" rx="3" fill="#64748b"/>'
+            '<rect x="94" y="56" width="8" height="20" rx="3" fill="#64748b"/>'
+            '<rect x="26" y="36" width="68" height="60" rx="14" fill="#94a3b8" stroke="#475569" stroke-width="3"/>'
+            '<rect x="34" y="46" width="52" height="40" rx="9" fill="#0f172a"/>'
+        )
+        face = _face(48, 72, 62, 80, mood, "#38bdf8")
+    elif idx == 3:  # Slime Lười Học
+        body = (
+            '<path d="M16 100Q16 38 60 38Q104 38 104 100Z" fill="#22c55e" stroke="#15803d" '
+            'stroke-width="3" stroke-linejoin="round"/>'
+            '<ellipse cx="38" cy="58" rx="8" ry="5" fill="#fff" opacity=".45" transform="rotate(-30 38 58)"/>'
+        )
+        face = _face(46, 74, 70, 88, mood, "#14532d")
+    else:  # Quái vật Quên Bài
+        body = (
+            '<line x1="44" y1="38" x2="36" y2="20" stroke="#5b21b6" stroke-width="4" stroke-linecap="round"/>'
+            '<line x1="76" y1="38" x2="84" y2="20" stroke="#5b21b6" stroke-width="4" stroke-linecap="round"/>'
+            '<circle cx="36" cy="18" r="5" fill="#f472b6"/><circle cx="84" cy="18" r="5" fill="#f472b6"/>'
+            '<ellipse cx="34" cy="102" rx="12" ry="7" fill="#6d28d9"/><ellipse cx="86" cy="102" rx="12" ry="7" fill="#6d28d9"/>'
+            '<ellipse cx="60" cy="68" rx="40" ry="34" fill="#8b5cf6" stroke="#5b21b6" stroke-width="3"/>'
+        )
+        face = _face(46, 74, 62, 82, mood, "#1e1b4b")
+    return f'<svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Quái vật">{body}{face}</svg>'
+
+
+def arena_html(state) -> str:
+    """Sàn đấu: quái vật động đậy, biết đau, biết trêu, có pháo giấy khi bị hạ."""
+    boss = state["boss"]
+    idx = BOSSES.index(boss) if boss in BOSSES else 0
+    hp, hp_max = state["boss_hp"], max(1, state["boss_hp_max"])
+    dead = hp <= 0
+    mood = "dead" if dead else "hurt" if hp / hp_max <= 0.5 else "calm"
+    last = state.get("last")
+    cls = "dead" if dead else "hit" if last == "hit" else "miss" if last == "miss" else "calm"
+    bubble = ""
+    if dead:
+        bubble = "Mình thua rồi... 😵"
+    elif state.get("over"):
+        bubble = "Mình thắng rồi nhé! 😈"
+    elif last == "hit":
+        bubble = "Á! Đau quá! 💢"
+    elif last == "miss":
+        bubble = "Hihi, sai rồi nhé! 😈"
+    fx = '<span class="fx">💥</span>' if last == "hit" and not dead else ""
+    conf = ""
+    if dead:
+        conf = "".join(
+            f'<span class="conf" style="left:{8 + i * 15}%;animation-delay:{i * 0.3:.1f}s">{e}</span>'
+            for i, e in enumerate(["🎉", "✨", "🎊", "⭐", "🎉", "✨"])
+        )
+    bub = f'<div class="bubble">{bubble}</div>' if bubble else ""
+    return f'<div class="arena">{conf}<div class="boss {cls}">{boss_svg(idx, mood)}</div>{bub}{fx}</div>'
 
 
 def hud_md(state) -> str:
@@ -1014,6 +1111,7 @@ def hud_md(state) -> str:
     pills += [f"🔥 Chuỗi {state['streak']}", f"⭐ +{state['xp']} XP", f"💡 ×{state['hints_left']}"]
     html = '<div class="hud">' + "".join(f'<span class="pill">{p}</span>' for p in pills) + "</div>"
     if boss_mode:
+        html = arena_html(state) + html
         pct = int(state["boss_hp"] / max(1, state["boss_hp_max"]) * 100)
         html += (
             f'<div class="barlabel">Máu quái vật: {state["boss_hp"]}/{state["boss_hp_max"]}</div>'
@@ -1094,6 +1192,16 @@ def start_sample(count, mode, subject=None):
     return begin(new_quiz_state(questions, ctx["label"], mode, ctx=ctx))
 
 
+def show_new_btn(state):
+    """Hiện nút Quiz mới khi đã có ván chơi."""
+    return gr.update(visible=bool(state))
+
+
+def reset_quiz(state):
+    """Thoát màn chơi hiện tại, quay về phần chọn bài để tạo quiz mới (tiến độ đã lưu sẵn)."""
+    return pack(state) + (gr.update(open=True), gr.update(visible=False), "", gr.update(visible=False))
+
+
 def collapse_if_started(state):
     """Thu gọn phần cài đặt khi ván chơi đã bắt đầu."""
     return gr.update(open=not state)
@@ -1167,6 +1275,7 @@ def check_answer(state, progress, choice):
     chosen = labels.index(choice)
     ok = chosen == q["answer"]
     state["answered"] = True
+    state["last"] = "hit" if ok else "miss"
     extra = ""
     if ok:
         state["score"] += 1
@@ -1333,7 +1442,7 @@ def finish_quiz(state: dict, progress: dict) -> str:
     boss = state["boss"]
     if state["mode"] == "boss":
         if won:
-            head = f"## 🏆 Chiến thắng! Bạn đã đánh bại {boss['name']} {boss['emoji']} ở màn {state['round']}"
+            head = f'<div class="winbanner">🏆 🎉 🏆</div>\n\n## 🏆 Chiến thắng! Bạn đã đánh bại {boss["name"]} {boss["emoji"]} ở màn {state["round"]}'
         elif state["over"]:
             head = (
                 f"## 💫 Hết mạng rồi! {boss['name']} thắng ván này, nhưng bạn đã học được rất nhiều. "
@@ -1393,6 +1502,7 @@ def next_question(state, progress):
         state["index"] += 1
         state["answered"] = False
         state["hinted"] = False
+        state["last"] = None
         question_md, radio = show_question(state)
         return (
             state, progress, hud_md(state), question_md, radio, "",
@@ -1619,7 +1729,8 @@ QUICK_PROMPTS = [
 ]
 
 HERO_HTML = (
-    '<div id="hero"><h1>📚 StudyBuddy</h1>'
+    '<div id="hero"><div class="floaties"><span>🧪</span><span>🚀</span><span>📐</span><span>🌍</span><span>🔬</span></div>'
+    '<h1>📚 StudyBuddy</h1>'
     "<p>Ôn bài kiểu chơi game: đấu quái vật, lên cấp, giữ chuỗi ngày học 🔥</p></div>"
 )
 
@@ -1647,9 +1758,51 @@ CSS = """
                 padding: 12px 14px !important; font-size: 1.05em; cursor: pointer; transition: all .15s;}
 #choices label:hover {border-color: #8b5cf6 !important; transform: translateY(-1px);}
 #start-btn {font-size: 1.1em;}
+/* ---- Sàn đấu và hiệu ứng ---- */
+.arena {position: relative; display: flex; justify-content: center; align-items: center; gap: 12px;
+        min-height: 150px; padding: 12px 8px 6px; margin-bottom: 8px; overflow: hidden; border-radius: 16px;
+        background: linear-gradient(180deg, rgba(99,102,241,.14), rgba(236,72,153,.10));
+        border: 1px solid var(--border-color-primary);}
+.arena::after {content: ""; position: absolute; left: 12%; right: 12%; bottom: 10px; height: 14px;
+               border-radius: 50%; background: rgba(0,0,0,.14); filter: blur(4px);}
+.boss {position: relative; z-index: 1;}
+.boss svg {width: 120px; height: 120px; display: block; filter: drop-shadow(0 6px 5px rgba(0,0,0,.25));}
+.boss.calm {animation: bob 2s ease-in-out infinite;}
+.boss.hit {animation: shake .55s;}
+.boss.miss {animation: taunt .7s;}
+.boss.dead {transform: rotate(-16deg) translateY(8px); opacity: .85; filter: grayscale(.35);}
+.bubble {position: relative; z-index: 1; background: #fff; color: #222; border-radius: 14px; padding: 7px 12px;
+         font-weight: 600; font-size: .9em; max-width: 46%; box-shadow: 0 2px 8px rgba(0,0,0,.18);}
+.bubble::before {content: ""; position: absolute; left: -7px; top: 50%; margin-top: -7px;
+                 border: 7px solid transparent; border-right-color: #fff; border-left: 0;}
+.fx {position: absolute; z-index: 2; top: 12px; left: 56%; font-size: 2.3em; pointer-events: none;
+     animation: pop .7s ease-out forwards;}
+.conf {position: absolute; z-index: 2; top: -24px; font-size: 1.4em; pointer-events: none;
+       animation: fall 2.4s linear infinite;}
+.winbanner {font-size: 2.4em; text-align: center; animation: pop2 .8s ease-out;}
+.pet {font-size: 3.4em; line-height: 1.1; display: inline-block; animation: bob 2.4s ease-in-out infinite;}
+#hero {position: relative; overflow: hidden;}
+.floaties span {position: absolute; font-size: 1.7em; opacity: .4; animation: bob 5s ease-in-out infinite;}
+.floaties span:nth-child(1) {right: 6%; top: 10px;}
+.floaties span:nth-child(2) {right: 16%; top: 38px; animation-delay: .8s;}
+.floaties span:nth-child(3) {right: 26%; top: 8px; animation-delay: 1.6s;}
+.floaties span:nth-child(4) {right: 36%; top: 40px; animation-delay: 2.4s;}
+.floaties span:nth-child(5) {right: 46%; top: 12px; animation-delay: 3.2s;}
+@keyframes bob {0%, 100% {transform: translateY(0);} 50% {transform: translateY(-7px);}}
+@keyframes shake {0%, 100% {transform: translateX(0);} 20% {transform: translateX(-10px) rotate(-6deg);}
+                  40% {transform: translateX(10px) rotate(6deg);} 60% {transform: translateX(-8px);}
+                  80% {transform: translateX(8px);}}
+@keyframes taunt {0% {transform: scale(1);} 30% {transform: scale(1.15) rotate(4deg);}
+                  60% {transform: scale(1.05) rotate(-4deg);} 100% {transform: scale(1);}}
+@keyframes pop {0% {transform: scale(.2); opacity: 0;} 50% {transform: scale(1.4); opacity: 1;}
+                100% {transform: scale(1); opacity: 0;}}
+@keyframes pop2 {0% {transform: scale(.3); opacity: 0;} 70% {transform: scale(1.2);} 100% {transform: scale(1); opacity: 1;}}
+@keyframes fall {0% {transform: translateY(0) rotate(0); opacity: 1;} 100% {transform: translateY(200px) rotate(360deg); opacity: 0;}}
+@media (prefers-reduced-motion: reduce) {.boss, .pet, .floaties span, .conf, .fx, .winbanner {animation: none !important;}}
 @media (max-width: 640px) {
   .gradio-container {padding: 6px !important;}
   #hero {padding: 14px 16px;} #hero h1 {font-size: 1.3em;}
+  .boss svg {width: 96px; height: 96px;} .floaties {display: none;}
   button {min-height: 46px;}
 }
 """
@@ -1732,6 +1885,7 @@ def build_ui():
                         type="filepath",
                     )
 
+            new_btn = gr.Button("🆕 Quiz mới (chọn bài khác)", visible=False, size="sm")
             hud = gr.HTML()
             question_md = gr.Markdown()
             choices = gr.Radio(label="Chọn đáp án (bấm vào là chấm ngay)", visible=False, elem_id="choices")
@@ -1756,10 +1910,12 @@ def build_ui():
             subject.change(topic_placeholder, [subject], topic)
             start_btn.click(
                 start_quiz, [topic, count, difficulty, mode, pasted, file_in, subject, grade], quiz_outputs
-            ).then(collapse_if_started, [quiz_state], setup).then(clear_explain, None, clear_targets)
+            ).then(collapse_if_started, [quiz_state], setup).then(clear_explain, None, clear_targets).then(
+                show_new_btn, [quiz_state], new_btn
+            )
             sample_btn.click(start_sample, [count, mode, subject], quiz_outputs).then(
                 collapse_if_started, [quiz_state], setup
-            ).then(clear_explain, None, clear_targets)
+            ).then(clear_explain, None, clear_targets).then(show_new_btn, [quiz_state], new_btn)
             choices.input(
                 check_answer,
                 [quiz_state, progress, choices],
@@ -1775,6 +1931,7 @@ def build_ui():
             ).then(clear_explain, None, clear_targets).then(welcome_md, [progress], welcome)
             round_btn.click(next_round, [quiz_state], quiz_outputs).then(clear_explain, None, clear_targets)
             retry_btn.click(retry_wrong, [quiz_state], quiz_outputs).then(clear_explain, None, clear_targets)
+            new_btn.click(reset_quiz, [quiz_state], quiz_outputs + [setup, new_btn, explain_md, explain_btn])
 
         # ---------------- Thẻ ghi nhớ
         with gr.Tab("🃏 Thẻ ghi nhớ"):
